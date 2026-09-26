@@ -5,12 +5,15 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
@@ -26,10 +29,17 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-data class GattRow(val service: String, val characteristic: String, val readable: Boolean, val writable: Boolean, val notifiable: Boolean)
+data class GattRow(
+    val service: String,
+    val characteristic: String,
+    val readable: Boolean,
+    val writable: Boolean,
+    val notifiable: Boolean
+)
 
 class SpaceBudsController(private val activity: ComponentActivity) {
-    private val adapter = BluetoothAdapter.getDefaultAdapter()
+    private val adapter: BluetoothAdapter? =
+        activity.getSystemService(BluetoothManager::class.java)?.adapter
     private val _device = MutableStateFlow<BluetoothDevice?>(null)
     val device = _device.asStateFlow()
     private val _connected = MutableStateFlow(false)
@@ -39,7 +49,10 @@ class SpaceBudsController(private val activity: ComponentActivity) {
     private var gattConnection: BluetoothGatt? = null
 
     private fun canConnect() =
-        ContextCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        ContextCompat.checkSelfPermission(
+            activity,
+            Manifest.permission.BLUETOOTH_CONNECT
+        ) == PackageManager.PERMISSION_GRANTED
 
     fun findPaired() {
         if (!canConnect()) return
@@ -53,7 +66,12 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         val target = _device.value ?: return
         if (!canConnect()) return
         gattConnection?.close()
-        gattConnection = target.connectGatt(activity, false, callback, BluetoothDevice.TRANSPORT_LE)
+        gattConnection = target.connectGatt(
+            activity,
+            false,
+            callback,
+            BluetoothDevice.TRANSPORT_LE
+        )
     }
 
     fun disconnect() {
@@ -65,21 +83,30 @@ class SpaceBudsController(private val activity: ComponentActivity) {
     }
 
     private val callback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            _connected.value = status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED
-            if (_connected.value) gatt.discoverServices()
+        override fun onConnectionStateChange(
+            gatt: BluetoothGatt,
+            status: Int,
+            newState: Int
+        ) {
+            _connected.value =
+                status == BluetoothGatt.GATT_SUCCESS &&
+                    newState == BluetoothProfile.STATE_CONNECTED
+            if (_connected.value && canConnect()) {
+                gatt.discoverServices()
+            }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) return
+            if (status != BluetoothGatt.GATT_SUCCESS || !canConnect()) return
             _gatt.value = gatt.services.flatMap { service ->
-                service.characteristics.map { c ->
+                service.characteristics.map { characteristic ->
+                    val properties = characteristic.properties
                     GattRow(
-                        service.uuid.toString(),
-                        c.uuid.toString(),
-                        c.properties and 0x02 != 0,
-                        c.properties and 0x08 != 0 || c.properties and 0x10 != 0,
-                        c.properties and 0x10 != 0
+                        service = service.uuid.toString(),
+                        characteristic = characteristic.uuid.toString(),
+                        readable = properties and 0x02 != 0,
+                        writable = properties and 0x08 != 0 || properties and 0x04 != 0,
+                        notifiable = properties and 0x10 != 0 || properties and 0x20 != 0
                     )
                 }
             }
@@ -112,13 +139,36 @@ fun SpaceBudsApp(activity: ComponentActivity) {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { controller.findPaired() }
 
-    MaterialTheme {
+    DisposableEffect(Unit) {
+        onDispose { controller.disconnect() }
+    }
+
+    val darkTheme = isSystemInDarkTheme()
+    val colors = when {
+        darkTheme && dynamicDarkColorSchemeAvailable(activity) ->
+            dynamicDarkColorScheme(activity)
+        !darkTheme && dynamicLightColorSchemeAvailable(activity) ->
+            dynamicLightColorScheme(activity)
+        else -> if (darkTheme) darkColorScheme() else lightColorScheme()
+    }
+
+    MaterialTheme(colorScheme = colors) {
         Scaffold(
-            topBar = { TopAppBar(title = { Text("SpaceBuds Z") }, navigationIcon = { Icon(Icons.Default.Headphones, null) }) },
+            topBar = {
+                TopAppBar(
+                    title = { Text("SpaceBuds Z") },
+                    navigationIcon = { Icon(Icons.Default.Headphones, null) }
+                )
+            },
             bottomBar = {
                 NavigationBar {
                     val labels = listOf("Home", "Sound", "Device", "GATT")
-                    val icons = listOf(Icons.Default.Headphones, Icons.Default.Settings, Icons.Default.Bluetooth, Icons.Default.Info)
+                    val icons = listOf(
+                        Icons.Default.Headphones,
+                        Icons.Default.Settings,
+                        Icons.Default.Bluetooth,
+                        Icons.Default.Info
+                    )
                     labels.forEachIndexed { index, label ->
                         NavigationBarItem(
                             selected = page == index,
@@ -131,23 +181,44 @@ fun SpaceBudsApp(activity: ComponentActivity) {
             }
         ) { padding ->
             LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
                 contentPadding = PaddingValues(20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 item {
                     ElevatedCard {
-                        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(device?.name ?: "SpaceBuds Z not detected", style = MaterialTheme.typography.headlineSmall)
+                        Column(
+                            Modifier.padding(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                device?.name ?: "SpaceBuds Z not detected",
+                                style = MaterialTheme.typography.headlineSmall
+                            )
                             Text(if (connected) "Connected" else "Not connected")
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Button(onClick = {
-                                    if (!canRequestBluetooth(activity)) {
-                                        permissionLauncher.launch(arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT))
-                                    } else controller.findPaired()
+                                    if (!hasBluetoothConnectPermission(activity)) {
+                                        permissionLauncher.launch(
+                                            arrayOf(
+                                                Manifest.permission.BLUETOOTH_SCAN,
+                                                Manifest.permission.BLUETOOTH_CONNECT
+                                            )
+                                        )
+                                    } else {
+                                        controller.findPaired()
+                                    }
                                 }) { Text("Find") }
-                                Button(enabled = device != null && !connected, onClick = controller::connect) { Text("Connect") }
-                                OutlinedButton(enabled = connected, onClick = controller::disconnect) { Text("Disconnect") }
+                                Button(
+                                    enabled = device != null && !connected,
+                                    onClick = controller::connect
+                                ) { Text("Connect") }
+                                OutlinedButton(
+                                    enabled = connected,
+                                    onClick = controller::disconnect
+                                ) { Text("Disconnect") }
                             }
                         }
                     }
@@ -155,11 +226,41 @@ fun SpaceBudsApp(activity: ComponentActivity) {
                 when (page) {
                     0 -> {
                         item { Text("Controls", style = MaterialTheme.typography.titleLarge) }
-                        item { ControlCard("ANC", "Up to 30 dB advertised noise reduction", anc) { anc = it } }
-                        item { ControlCard("Transparency", "Control surface; vendor command protocol is not public", transparency) { transparency = it } }
-                        item { ControlCard("Game Mode", "Low-latency mode advertised by Oraimo", game) { game = it } }
-                        item { ControlCard("Sound360", "Spatial audio", spatial) { spatial = it } }
-                        item { ControlCard("HavyBass", "Bass tuning profile", bass > 0.5f) { bass = if (it) 0.75f else 0.5f } }
+                        item {
+                            ControlCard(
+                                "ANC",
+                                "Up to 30 dB advertised noise reduction",
+                                anc
+                            ) { anc = it }
+                        }
+                        item {
+                            ControlCard(
+                                "Transparency",
+                                "Control surface; vendor command protocol is not public",
+                                transparency
+                            ) { transparency = it }
+                        }
+                        item {
+                            ControlCard(
+                                "Game Mode",
+                                "Low-latency mode advertised by Oraimo",
+                                game
+                            ) { game = it }
+                        }
+                        item {
+                            ControlCard(
+                                "Sound360",
+                                "Spatial audio",
+                                spatial
+                            ) { spatial = it }
+                        }
+                        item {
+                            ControlCard(
+                                "HavyBass",
+                                "Bass tuning profile",
+                                bass > 0.5f
+                            ) { bass = if (it) 0.75f else 0.5f }
+                        }
                     }
                     1 -> {
                         item { Text("Sound", style = MaterialTheme.typography.titleLarge) }
@@ -172,7 +273,9 @@ fun SpaceBudsApp(activity: ComponentActivity) {
                                 }
                             }
                         }
-                        item { ControlCard("Sound360", "Spatial audio", spatial) { spatial = it } }
+                        item {
+                            ControlCard("Sound360", "Spatial audio", spatial) { spatial = it }
+                        }
                     }
                     2 -> {
                         item { Text("Device", style = MaterialTheme.typography.titleLarge) }
@@ -186,15 +289,30 @@ fun SpaceBudsApp(activity: ComponentActivity) {
                         item { InfoCard("Dual-device", "Supported") }
                     }
                     3 -> {
-                        item { Text("GATT diagnostics", style = MaterialTheme.typography.titleLarge) }
-                        item { Text("Reads services and characteristics exposed by the connected device. No undocumented vendor commands are sent.") }
+                        item {
+                            Text(
+                                "GATT diagnostics",
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                        }
+                        item {
+                            Text(
+                                "Reads services and characteristics exposed by the connected device. " +
+                                    "No undocumented vendor commands are sent."
+                            )
+                        }
                         gatt.forEach { row ->
                             item {
                                 ElevatedCard {
                                     Column(Modifier.padding(14.dp)) {
                                         Text(row.service, style = MaterialTheme.typography.labelSmall)
                                         Text(row.characteristic)
-                                        Text("read=" + row.readable + "  write=" + row.writable + "  notify=" + row.notifiable, style = MaterialTheme.typography.bodySmall)
+                                        Text(
+                                            "read=" + row.readable +
+                                                "  write=" + row.writable +
+                                                "  notify=" + row.notifiable,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
                                     }
                                 }
                             }
@@ -206,11 +324,25 @@ fun SpaceBudsApp(activity: ComponentActivity) {
     }
 }
 
-private fun canRequestBluetooth(activity: ComponentActivity): Boolean =
-    ContextCompat.checkSelfPermission(activity, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+private fun hasBluetoothConnectPermission(activity: ComponentActivity): Boolean =
+    ContextCompat.checkSelfPermission(
+        activity,
+        Manifest.permission.BLUETOOTH_CONNECT
+    ) == PackageManager.PERMISSION_GRANTED
+
+private fun dynamicDarkColorSchemeAvailable(activity: ComponentActivity): Boolean =
+    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
+
+private fun dynamicLightColorSchemeAvailable(activity: ComponentActivity): Boolean =
+    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
 
 @Composable
-private fun ControlCard(title: String, detail: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+private fun ControlCard(
+    title: String,
+    detail: String,
+    checked: Boolean,
+    onChecked: (Boolean) -> Unit
+) {
     ElevatedCard {
         ListItem(
             headlineContent = { Text(title) },
@@ -223,6 +355,9 @@ private fun ControlCard(title: String, detail: String, checked: Boolean, onCheck
 @Composable
 private fun InfoCard(title: String, value: String) {
     ElevatedCard {
-        ListItem(headlineContent = { Text(title) }, supportingContent = { Text(value) })
+        ListItem(
+            headlineContent = { Text(title) },
+            supportingContent = { Text(value) }
+        )
     }
 }
