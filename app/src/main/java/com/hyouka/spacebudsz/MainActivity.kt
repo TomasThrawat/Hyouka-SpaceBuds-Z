@@ -5,9 +5,11 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattConnectionSettings
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -66,12 +68,25 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         val target = _device.value ?: return
         if (!canConnect()) return
         gattConnection?.close()
-        gattConnection = target.connectGatt(
-            activity,
-            false,
-            callback,
-            BluetoothDevice.TRANSPORT_LE
-        )
+        gattConnection = connectGattCompat(target)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun connectGattCompat(target: BluetoothDevice): BluetoothGatt? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val settings = BluetoothGattConnectionSettings.Builder()
+                .setAutoConnectEnabled(false)
+                .setTransport(BluetoothDevice.TRANSPORT_LE)
+                .build()
+            target.connectGatt(settings, activity.mainExecutor, callback)
+        } else {
+            target.connectGatt(
+                activity,
+                false,
+                callback,
+                BluetoothDevice.TRANSPORT_LE
+            )
+        }
     }
 
     fun disconnect() {
@@ -145,9 +160,9 @@ fun SpaceBudsApp(activity: ComponentActivity) {
 
     val darkTheme = isSystemInDarkTheme()
     val colors = when {
-        darkTheme && dynamicDarkColorSchemeAvailable(activity) ->
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && darkTheme ->
             dynamicDarkColorScheme(activity)
-        !darkTheme && dynamicLightColorSchemeAvailable(activity) ->
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
             dynamicLightColorScheme(activity)
         else -> if (darkTheme) darkColorScheme() else lightColorScheme()
     }
@@ -329,12 +344,6 @@ private fun hasBluetoothConnectPermission(activity: ComponentActivity): Boolean 
         activity,
         Manifest.permission.BLUETOOTH_CONNECT
     ) == PackageManager.PERMISSION_GRANTED
-
-private fun dynamicDarkColorSchemeAvailable(activity: ComponentActivity): Boolean =
-    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
-
-private fun dynamicLightColorSchemeAvailable(activity: ComponentActivity): Boolean =
-    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
 
 @Composable
 private fun ControlCard(
