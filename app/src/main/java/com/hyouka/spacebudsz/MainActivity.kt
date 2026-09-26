@@ -78,11 +78,49 @@ class SpaceBudsController(private val activity: ComponentActivity) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var gattTimeoutRunnable: Runnable? = null
     private var receiverRegistered = false
+    private var a2dpProxy: BluetoothA2dp? = null
+    private var headsetProxy: BluetoothHeadset? = null
 
     private val bluetoothReceiver = object : BroadcastReceiver() {
         override fun onReceive(_context: Context, _intent: Intent) {
             if (canConnect()) {
                 mainHandler.post { refreshSystemConnection() }
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private val profileListener = object : BluetoothProfile.ServiceListener {
+        override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+            when (profile) {
+                BluetoothProfile.A2DP -> a2dpProxy = proxy as? BluetoothA2dp
+                BluetoothProfile.HEADSET -> headsetProxy = proxy as? BluetoothHeadset
+            }
+            mainHandler.post { refreshSystemConnection() }
+        }
+
+        override fun onServiceDisconnected(profile: Int) {
+            when (profile) {
+                BluetoothProfile.A2DP -> a2dpProxy = null
+                BluetoothProfile.HEADSET -> headsetProxy = null
+            }
+            mainHandler.post { refreshSystemConnection() }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun ensureProfileProxies() {
+        if (!canConnect()) return
+        adapter ?: return
+
+        if (a2dpProxy == null) {
+            runCatching {
+                adapter.getProfileProxy(activity, profileListener, BluetoothProfile.A2DP)
+            }
+        }
+        if (headsetProxy == null) {
+            runCatching {
+                adapter.getProfileProxy(activity, profileListener, BluetoothProfile.HEADSET)
             }
         }
     }
@@ -137,6 +175,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
             }
         }
 
+        ensureProfileProxies()
         refreshSystemConnection()
     }
 
@@ -164,16 +203,12 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         }
 
         val connectedDevices = buildList {
-            addAll(
-                runCatching {
-                    bluetoothManager?.getConnectedDevices(BluetoothProfile.A2DP).orEmpty()
-                }.getOrDefault(emptyList())
-            )
-            addAll(
-                runCatching {
-                    bluetoothManager?.getConnectedDevices(BluetoothProfile.HEADSET).orEmpty()
-                }.getOrDefault(emptyList())
-            )
+            a2dpProxy?.let { proxy ->
+                addAll(runCatching { proxy.connectedDevices }.getOrDefault(emptyList()))
+            }
+            headsetProxy?.let { proxy ->
+                addAll(runCatching { proxy.connectedDevices }.getOrDefault(emptyList()))
+            }
             addAll(
                 runCatching {
                     bluetoothManager?.getConnectedDevices(BluetoothProfile.GATT).orEmpty()
@@ -186,6 +221,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
             .firstOrNull(::isSpaceBuds)
 
         if (candidate == null) {
+            _device.value = null
             _bluetoothConnected.value = false
             closeGatt()
             _status.value = "Connect SpaceBuds Z from Android Bluetooth settings"
@@ -311,6 +347,13 @@ class SpaceBudsController(private val activity: ComponentActivity) {
             receiverRegistered = false
         }
         closeGatt()
+        @Suppress("DEPRECATION")
+        runCatching {
+            a2dpProxy?.let { adapter?.closeProfileProxy(BluetoothProfile.A2DP, it) }
+            headsetProxy?.let { adapter?.closeProfileProxy(BluetoothProfile.HEADSET, it) }
+        }
+        a2dpProxy = null
+        headsetProxy = null
         mainHandler.removeCallbacksAndMessages(null)
     }
 
