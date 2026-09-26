@@ -115,12 +115,12 @@ class SpaceBudsController(private val activity: ComponentActivity) {
 
         if (a2dpProxy == null) {
             runCatching {
-                adapter.getProfileProxy(activity, profileListener, BluetoothProfile.A2DP)
+                adapter?.getProfileProxy(activity, profileListener, BluetoothProfile.A2DP)
             }
         }
         if (headsetProxy == null) {
             runCatching {
-                adapter.getProfileProxy(activity, profileListener, BluetoothProfile.HEADSET)
+                adapter?.getProfileProxy(activity, profileListener, BluetoothProfile.HEADSET)
             }
         }
     }
