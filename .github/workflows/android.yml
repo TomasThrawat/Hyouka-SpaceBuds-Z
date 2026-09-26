@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      GRADLE_OPTS: "-Xmx1g -Dorg.gradle.configuration-cache=true"
+      GRADLE_OPTS: "-Xms256m -Xmx512m -XX:MaxMetaspaceSize=384m -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8 -Duser.country -Duser.language=en -Duser.variant -Dorg.gradle.configuration-cache=true"
     steps:
       - name: Configure Git default branch
         run: git config --global init.defaultBranch main
