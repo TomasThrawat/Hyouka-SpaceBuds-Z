@@ -266,14 +266,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         if (candidate == null) {
             _device.value = null
             _bluetoothConnected.value = false
-            closeGatt()
-            _status.value = "Connect SpaceBuds Z from Android Bluetooth settings"
-            return
-        }
-
-        if (candidate == null) {
-            _device.value = null
-            _bluetoothConnected.value = false
+            gattUnavailable = false
             closeGatt()
             _status.value = "Connect SpaceBuds Z from Android Bluetooth settings"
             return
@@ -284,6 +277,11 @@ class SpaceBudsController(private val activity: ComponentActivity) {
 
     private fun handleBluetoothConnected(candidate: BluetoothDevice) {
         if (disposed || !canConnect()) return
+
+        val previous = _device.value
+        if (previous != null && previous.address != candidate.address) {
+            closeGatt()
+        }
 
         _device.value = candidate
         _bluetoothConnected.value = true
@@ -335,8 +333,15 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         _gatt.value = emptyList()
         gattAttempt = 0
         gattUnavailable = false
-        _status.value = "Bluetooth connected. Opening device diagnostics..."
 
+        val deviceType = runCatching { target.type }
+            .getOrDefault(BluetoothDevice.DEVICE_TYPE_UNKNOWN)
+        if (deviceType == BluetoothDevice.DEVICE_TYPE_CLASSIC) {
+            markGattUnavailable(target)
+            return
+        }
+
+        _status.value = "Bluetooth connected. Opening device diagnostics..."
         startGattAttempt(target, 0)
     }
 
@@ -454,6 +459,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         gattConnection = null
         _connected.value = false
         _connecting.value = false
+        gattUnavailable = false
         _gatt.value = emptyList()
     }
 
@@ -498,7 +504,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
                 status == BluetoothGatt.GATT_SUCCESS &&
                 newState == BluetoothProfile.STATE_CONNECTED
             ) {
-                _connecting.value = false
+                _connecting.value = true
                 _connected.value = false
                 _status.value = "Bluetooth connected. Discovering GATT services..."
 
@@ -579,14 +585,21 @@ class SpaceBudsController(private val activity: ComponentActivity) {
             if (disposed || gattConnection !== gatt || !canConnect()) return
 
             _connected.value = false
+            _connecting.value = true
             _status.value = "Bluetooth connected. GATT database changed; rediscovering services..."
             if (gatt.discoverServices()) {
                 cancelGattDiscoveryTimeout()
                 gattDiscoveryTimeoutRunnable = Runnable {
                     if (!disposed && gattConnection === gatt && !_connected.value) {
+                        runCatching { gatt.close() }
+                        gattConnection = null
                         markGattUnavailable(gatt.device)
                     }
                 }.also { mainHandler.postDelayed(it, GATT_DISCOVERY_TIMEOUT_MS) }
+            } else {
+                runCatching { gatt.close() }
+                gattConnection = null
+                markGattUnavailable(gatt.device)
             }
         }
     }
@@ -639,19 +652,24 @@ fun SpaceBudsApp(activity: ComponentActivity) {
         }
     }
 
+    LaunchedEffect(Unit) {
+        if (!hasBluetoothConnectPermission(activity)) {
+            permissionLauncher.launch(
+                arrayOf(Manifest.permission.BLUETOOTH_CONNECT)
+            )
+        } else {
+            controller.startMonitoring()
+        }
+    }
+
     DisposableEffect(Unit) {
-        controller.startMonitoring()
         onDispose { controller.close() }
     }
 
     val darkTheme = isSystemInDarkTheme()
-    val colors = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && darkTheme ->
-            dynamicDarkColorScheme(activity)
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-            dynamicLightColorScheme(activity)
-        else -> if (darkTheme) darkColorScheme() else lightColorScheme()
-    }
+    val colors =
+        if (darkTheme) dynamicDarkColorScheme(activity)
+        else dynamicLightColorScheme(activity)
 
     MaterialTheme(colorScheme = colors) {
         Scaffold(
