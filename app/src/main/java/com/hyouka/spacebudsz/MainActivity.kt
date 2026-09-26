@@ -49,7 +49,8 @@ data class GattRow(
 
 class SpaceBudsController(private val activity: ComponentActivity) {
     companion object {
-        private const val GATT_CONNECT_TIMEOUT_MS = 15_000L
+        private const val GATT_CONNECT_TIMEOUT_MS = 20_000L
+        private const val MAX_GATT_ATTEMPTS = 2
     }
 
     private val bluetoothManager: BluetoothManager? =
@@ -77,6 +78,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
     private var gattConnection: BluetoothGatt? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var gattTimeoutRunnable: Runnable? = null
+    private var gattAttempt = 0
     private var receiverRegistered = false
     private var a2dpProxy: BluetoothA2dp? = null
     private var headsetProxy: BluetoothHeadset? = null
@@ -269,44 +271,78 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         _connected.value = false
         _connecting.value = true
         _gatt.value = emptyList()
+        gattAttempt = 0
         _status.value = "Bluetooth connected. Opening device GATT..."
 
+        startGattAttempt(target, 0)
+    }
+
+    private fun startGattAttempt(target: BluetoothDevice, attempt: Int) {
+        if (!canConnect()) {
+            _connecting.value = false
+            _status.value = "Bluetooth permission is required"
+            return
+        }
+
+        cancelGattTimeout()
+        gattAttempt = attempt
+
+        val transport = if (attempt == 0) {
+            BluetoothDevice.TRANSPORT_AUTO
+        } else {
+            BluetoothDevice.TRANSPORT_LE
+        }
+        val transportName = if (attempt == 0) "AUTO" else "LE"
+
         val gatt = runCatching {
-            connectGattCompat(target)
+            connectGattCompat(target, transport)
         }.getOrElse {
             _connecting.value = false
             _status.value =
-                "Bluetooth is connected, but GATT could not start: " +
+                "Bluetooth is connected, but GATT could not start ($transportName): " +
                     it.javaClass.simpleName
             null
         }
 
-        gattConnection = gatt
+        if (gatt == null) return
 
-        if (gatt == null) {
-            _connecting.value = false
-            return
-        }
+        gattConnection = gatt
+        _status.value =
+            "Bluetooth connected. Opening GATT with transport $transportName..."
 
         gattTimeoutRunnable = Runnable {
             if (_connecting.value && gattConnection === gatt) {
                 runCatching { gatt.disconnect() }
                 runCatching { gatt.close() }
                 gattConnection = null
-                _connecting.value = false
-                _connected.value = false
-                _status.value =
-                    "Bluetooth is connected, but GATT timed out after 15 seconds."
+
+                if (attempt + 1 < MAX_GATT_ATTEMPTS) {
+                    _status.value =
+                        "GATT transport $transportName timed out. Retrying with LE..."
+                    mainHandler.post {
+                        startGattAttempt(target, attempt + 1)
+                    }
+                } else {
+                    _connecting.value = false
+                    _connected.value = false
+                    _status.value =
+                        "Bluetooth is connected, but GATT timed out after " +
+                            (GATT_CONNECT_TIMEOUT_MS * MAX_GATT_ATTEMPTS / 1000) +
+                            " seconds."
+                }
             }
         }.also { mainHandler.postDelayed(it, GATT_CONNECT_TIMEOUT_MS) }
     }
 
     @Suppress("DEPRECATION")
-    private fun connectGattCompat(target: BluetoothDevice): BluetoothGatt? {
+    private fun connectGattCompat(
+        target: BluetoothDevice,
+        transport: Int
+    ): BluetoothGatt? {
         return if (Build.VERSION.SDK_INT >= 37) {
             val settings = BluetoothGattConnectionSettings.Builder()
                 .setAutoConnectEnabled(false)
-                .setTransport(BluetoothDevice.TRANSPORT_LE)
+                .setTransport(transport)
                 .build()
             target.connectGatt(settings, activity.mainExecutor, callback)
         } else {
@@ -314,7 +350,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
                 activity,
                 false,
                 callback,
-                BluetoothDevice.TRANSPORT_LE
+                transport
             )
         }
     }
@@ -383,14 +419,29 @@ class SpaceBudsController(private val activity: ComponentActivity) {
                         "Bluetooth connected, but GATT service discovery could not start"
                 }
             } else {
-                _connecting.value = false
-                _connected.value = false
-                _status.value =
-                    "Bluetooth is connected, but GATT failed: status=" +
-                        status + ", state=" + newState
+                val target = gatt.device
+                val shouldRetry = gattConnection === gatt &&
+                    gattAttempt + 1 < MAX_GATT_ATTEMPTS
+
                 runCatching { gatt.close() }
                 if (gattConnection === gatt) {
                     gattConnection = null
+                }
+
+                if (shouldRetry) {
+                    _status.value =
+                        "GATT failed on transport " +
+                            (if (gattAttempt == 0) "AUTO" else "LE") +
+                            " (status=" + status + "). Retrying with LE..."
+                    mainHandler.post {
+                        startGattAttempt(target, gattAttempt + 1)
+                    }
+                } else {
+                    _connecting.value = false
+                    _connected.value = false
+                    _status.value =
+                        "Bluetooth is connected, but GATT failed: status=" +
+                            status + ", state=" + newState
                 }
             }
         }
