@@ -17,7 +17,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - run: gradle assembleDebug --stacktrace --warning-mode all
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Hyouka-SpaceBuds-Z-debug
           path: app/build/outputs/apk/debug/*.apk
