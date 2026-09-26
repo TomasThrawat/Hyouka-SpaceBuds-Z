@@ -10,9 +10,6 @@ import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattConnectionSettings
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -83,7 +80,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
     private var receiverRegistered = false
 
     private val bluetoothReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
+        override fun onReceive(_context: Context, _intent: Intent) {
             if (canConnect()) {
                 mainHandler.post { refreshSystemConnection() }
             }
@@ -127,7 +124,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
                     activity.registerReceiver(
                         bluetoothReceiver,
                         filter,
-                        Context.RECEIVER_NOT_EXPORTED
+                        Context.RECEIVER_EXPORTED
                     )
                 } else {
                     @Suppress("DEPRECATION")
@@ -411,8 +408,6 @@ class MainActivity : ComponentActivity() {
 fun SpaceBudsApp(activity: ComponentActivity) {
     val controller = remember { SpaceBudsController(activity) }
     val device by controller.device.collectAsState()
-    val connected by controller.connected.collectAsState()
-    val connecting by controller.connecting.collectAsState()
     val status by controller.status.collectAsState()
     val gatt by controller.gatt.collectAsState()
     var page by remember { mutableIntStateOf(0) }
@@ -425,9 +420,7 @@ fun SpaceBudsApp(activity: ComponentActivity) {
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        if (permissions[Manifest.permission.BLUETOOTH_CONNECT] == true &&
-            permissions[Manifest.permission.BLUETOOTH_SCAN] == true
-        ) {
+        if (permissions[Manifest.permission.BLUETOOTH_CONNECT] == true) {
             controller.startMonitoring()
         } else {
             controller.disconnect()
@@ -501,7 +494,6 @@ fun SpaceBudsApp(activity: ComponentActivity) {
                                     if (!hasBluetoothConnectPermission(activity)) {
                                         permissionLauncher.launch(
                                             arrayOf(
-                                                Manifest.permission.BLUETOOTH_SCAN,
                                                 Manifest.permission.BLUETOOTH_CONNECT
                                             )
                                         )
