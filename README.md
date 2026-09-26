@@ -2,8 +2,10 @@ Hyouka SpaceBuds Z
 
 Native Kotlin + Jetpack Compose companion app for Oraimo SpaceBuds Z OTW-625.
 
-The app includes a Material You interface, paired-device discovery, Bluetooth LE connection, GATT diagnostics, and feature surfaces for capabilities documented by Oraimo: ANC up to 30 dB, Sound360 spatial audio, HavyBass, Game Mode, dual-device connectivity, AniFast charging, and four-microphone ENC.
+The app detects supported earbuds that are already connected through Android Bluetooth profiles, then attempts GATT diagnostics in the background. It does not scan for Bluetooth devices.
 
-Important: Oraimo's public product documentation does not publish a vendor GATT command protocol for these proprietary controls. The UI therefore does not claim to change firmware state until a verified protocol is available. GATT diagnostics exposes what the connected device actually publishes.
+Bluetooth connection and GATT availability are separate: a SpaceBuds Z device can be connected for audio while exposing no usable GATT server to the app. In that case the app still reports the earbuds as connected and marks GATT as unavailable.
+
+The feature surfaces for ANC, Sound360, HavyBass, Game Mode, and similar vendor controls remain informational/disabled because Oraimo's public product documentation does not publish a verified vendor control protocol. The app does not send undocumented commands.
 
 Target: Android 12+.

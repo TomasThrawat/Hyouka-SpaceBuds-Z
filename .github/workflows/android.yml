@@ -5,6 +5,8 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,6 +21,8 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: "9.7.1"
       - run: gradle testDebugUnitTest assembleDebug --stacktrace --warning-mode all
       - name: Upload debug APK
         uses: actions/upload-artifact@v7
