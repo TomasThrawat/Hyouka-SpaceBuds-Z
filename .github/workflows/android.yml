@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      GRADLE_OPTS: "-Xmx1g -Dorg.gradle.configuration-cache=true"
     steps:
       - name: Configure Git default branch
         run: git config --global init.defaultBranch main
