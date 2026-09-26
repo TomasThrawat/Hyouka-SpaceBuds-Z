@@ -45,6 +45,9 @@ data class GattRow(
 )
 
 class SpaceBudsController(private val activity: ComponentActivity) {
+    companion object {
+        private const val GATT_CONNECT_TIMEOUT_MS = 15_000L
+    }
     private val bluetoothManager: BluetoothManager? =
         activity.getSystemService(BluetoothManager::class.java)
     private val adapter: BluetoothAdapter? = bluetoothManager?.adapter
@@ -61,6 +64,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
     private var gattConnection: BluetoothGatt? = null
     private var scanCallback: ScanCallback? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var gattTimeoutRunnable: Runnable? = null
 
     private val profileListener = object : BluetoothProfile.ServiceListener {
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
@@ -171,14 +175,20 @@ class SpaceBudsController(private val activity: ComponentActivity) {
 
     private fun connectTo(target: BluetoothDevice) {
         stopScan()
-        gattConnection?.close()
+        cancelGattTimeout()
+
+        gattConnection?.let { oldGatt ->
+            runCatching { oldGatt.disconnect() }
+            runCatching { oldGatt.close() }
+        }
         gattConnection = null
+
         _connected.value = false
         _connecting.value = true
         _gatt.value = emptyList()
-        _status.value = "Connecting to " + safeName(target) + "..."
+        _status.value = "Connecting to " + safeName(target) + " over BLE..."
 
-        gattConnection = runCatching {
+        val gatt = runCatching {
             connectGattCompat(target)
         }.getOrElse {
             _connecting.value = false
@@ -186,10 +196,25 @@ class SpaceBudsController(private val activity: ComponentActivity) {
             null
         }
 
-        if (gattConnection == null) {
+        gattConnection = gatt
+
+        if (gatt == null) {
             _connecting.value = false
             _status.value = "Could not start GATT connection"
+            return
         }
+
+        gattTimeoutRunnable = Runnable {
+            if (_connecting.value && gattConnection === gatt) {
+                runCatching { gatt.disconnect() }
+                runCatching { gatt.close() }
+                gattConnection = null
+                _connecting.value = false
+                _connected.value = false
+                _status.value =
+                    "GATT connection timed out after 15 seconds. The earbuds may be connected for audio but not exposing a reachable GATT server."
+            }
+        }.also { mainHandler.postDelayed(it, GATT_CONNECT_TIMEOUT_MS) }
     }
 
     private fun scanForSpaceBuds(autoConnect: Boolean) {
@@ -264,10 +289,10 @@ class SpaceBudsController(private val activity: ComponentActivity) {
 
     @Suppress("DEPRECATION")
     private fun connectGattCompat(target: BluetoothDevice): BluetoothGatt? {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        return if (Build.VERSION.SDK_INT >= 37) {
             val settings = BluetoothGattConnectionSettings.Builder()
                 .setAutoConnectEnabled(false)
-                .setTransport(BluetoothDevice.TRANSPORT_AUTO)
+                .setTransport(BluetoothDevice.TRANSPORT_LE)
                 .build()
             target.connectGatt(settings, activity.mainExecutor, callback)
         } else {
@@ -275,15 +300,23 @@ class SpaceBudsController(private val activity: ComponentActivity) {
                 activity,
                 false,
                 callback,
-                BluetoothDevice.TRANSPORT_AUTO
+                BluetoothDevice.TRANSPORT_LE
             )
         }
     }
 
+    private fun cancelGattTimeout() {
+        gattTimeoutRunnable?.let(mainHandler::removeCallbacks)
+        gattTimeoutRunnable = null
+    }
+
     fun disconnect() {
         stopScan()
-        gattConnection?.disconnect()
-        gattConnection?.close()
+        cancelGattTimeout()
+        gattConnection?.let { gatt ->
+            runCatching { gatt.disconnect() }
+            runCatching { gatt.close() }
+        }
         gattConnection = null
         _connected.value = false
         _connecting.value = false
@@ -302,6 +335,13 @@ class SpaceBudsController(private val activity: ComponentActivity) {
             status: Int,
             newState: Int
         ) {
+            if (gattConnection !== gatt) {
+                runCatching { gatt.close() }
+                return
+            }
+
+            cancelGattTimeout()
+
             if (
                 status == BluetoothGatt.GATT_SUCCESS &&
                 newState == BluetoothProfile.STATE_CONNECTED
@@ -317,7 +357,12 @@ class SpaceBudsController(private val activity: ComponentActivity) {
             } else {
                 _connecting.value = false
                 _connected.value = false
-                _status.value = "GATT connection failed: status=" + status + ", state=" + newState
+                _status.value =
+                    "GATT connection failed: status=" + status + ", state=" + newState
+                runCatching { gatt.close() }
+                if (gattConnection === gatt) {
+                    gattConnection = null
+                }
             }
         }
 
@@ -437,13 +482,7 @@ fun SpaceBudsApp(activity: ComponentActivity) {
                                 } ?: "SpaceBuds Z not detected",
                                 style = MaterialTheme.typography.headlineSmall
                             )
-                            Text(
-                                when {
-                                    connected -> "Connected"
-                                    connecting -> "Connecting..."
-                                    else -> status
-                                }
-                            )
+                            Text(status)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Button(onClick = {
                                     if (!hasBluetoothConnectPermission(activity)) {
