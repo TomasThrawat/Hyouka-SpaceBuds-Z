@@ -2,6 +2,8 @@ package com.hyouka.spacebudsz
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothA2dp
+import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
@@ -11,6 +13,10 @@ import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -48,136 +54,180 @@ class SpaceBudsController(private val activity: ComponentActivity) {
     companion object {
         private const val GATT_CONNECT_TIMEOUT_MS = 15_000L
     }
+
     private val bluetoothManager: BluetoothManager? =
         activity.getSystemService(BluetoothManager::class.java)
     private val adapter: BluetoothAdapter? = bluetoothManager?.adapter
+
     private val _device = MutableStateFlow<BluetoothDevice?>(null)
     val device = _device.asStateFlow()
+
+    private val _bluetoothConnected = MutableStateFlow(false)
+    val bluetoothConnected = _bluetoothConnected.asStateFlow()
+
     private val _connected = MutableStateFlow(false)
     val connected = _connected.asStateFlow()
+
     private val _connecting = MutableStateFlow(false)
     val connecting = _connecting.asStateFlow()
-    private val _status = MutableStateFlow("Ready")
+
+    private val _status = MutableStateFlow("Connect SpaceBuds Z from Android Bluetooth settings")
     val status = _status.asStateFlow()
+
     private val _gatt = MutableStateFlow<List<GattRow>>(emptyList())
     val gatt = _gatt.asStateFlow()
+
     private var gattConnection: BluetoothGatt? = null
-    private var scanCallback: ScanCallback? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var gattTimeoutRunnable: Runnable? = null
+    private var receiverRegistered = false
 
-    private val profileListener = object : BluetoothProfile.ServiceListener {
-        override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+    private val bluetoothReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
             if (canConnect()) {
-                val candidate = proxy.connectedDevices.firstOrNull(::isSpaceBuds)
-                if (candidate != null) {
-                    _device.value = candidate
-                    _status.value = "AirBuds detected: " + safeName(candidate)
-                }
+                mainHandler.post { refreshSystemConnection() }
             }
-            @Suppress("DEPRECATION")
-            adapter?.closeProfileProxy(profile, proxy)
         }
-
-        override fun onServiceDisconnected(profile: Int) = Unit
     }
 
-    private fun canConnect() =
+    private fun canConnect(): Boolean =
         ContextCompat.checkSelfPermission(
             activity,
             Manifest.permission.BLUETOOTH_CONNECT
         ) == PackageManager.PERMISSION_GRANTED
 
-    private fun canScan() =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            ContextCompat.checkSelfPermission(
-                activity,
-                Manifest.permission.BLUETOOTH_SCAN
-            ) == PackageManager.PERMISSION_GRANTED
-
-    private fun isSpaceBuds(device: BluetoothDevice): Boolean {
-        val name = runCatching {
-            if (canConnect()) device.name else null
-        }.getOrNull() ?: return false
-        val normalized = name.replace(" ", "").replace("-", "").lowercase()
-        return normalized.contains("spacebuds") ||
-            normalized.contains("otw625") ||
-            normalized.contains("625l")
-    }
+    private fun isSpaceBuds(device: BluetoothDevice): Boolean =
+        isSupportedSpaceBudsName(
+            runCatching {
+                if (canConnect()) device.name else null
+            }.getOrNull()
+        )
 
     private fun safeName(device: BluetoothDevice): String =
         runCatching {
             if (canConnect()) device.name else null
         }.getOrNull() ?: "Unknown AirBuds"
 
-    fun refresh() {
+    fun startMonitoring() {
         if (!canConnect()) {
+            _status.value = "Bluetooth permission is required"
+            return
+        }
+
+        if (!receiverRegistered) {
+            val filter = IntentFilter().apply {
+                addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
+                addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+                addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+                addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+            }
+
+            runCatching {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    activity.registerReceiver(
+                        bluetoothReceiver,
+                        filter,
+                        Context.RECEIVER_NOT_EXPORTED
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    activity.registerReceiver(bluetoothReceiver, filter)
+                }
+                receiverRegistered = true
+            }.onFailure {
+                _status.value =
+                    "Bluetooth monitoring could not start: " + it.javaClass.simpleName
+            }
+        }
+
+        refreshSystemConnection()
+    }
+
+    private fun refreshSystemConnection() {
+        if (!canConnect()) {
+            _bluetoothConnected.value = false
+            closeGatt()
             _status.value = "Bluetooth permission is required"
             return
         }
 
         val bt = adapter
         if (bt == null) {
+            _bluetoothConnected.value = false
+            closeGatt()
             _status.value = "Bluetooth adapter unavailable"
             return
         }
 
         if (!bt.isEnabled) {
+            _bluetoothConnected.value = false
+            closeGatt()
             _status.value = "Bluetooth is turned off"
             return
         }
 
-        val gattConnected = runCatching {
-            bluetoothManager?.getConnectedDevices(BluetoothProfile.GATT).orEmpty()
-        }.getOrDefault(emptyList())
+        val connectedDevices = buildList {
+            addAll(
+                runCatching {
+                    bluetoothManager?.getConnectedDevices(BluetoothProfile.A2DP).orEmpty()
+                }.getOrDefault(emptyList())
+            )
+            addAll(
+                runCatching {
+                    bluetoothManager?.getConnectedDevices(BluetoothProfile.HEADSET).orEmpty()
+                }.getOrDefault(emptyList())
+            )
+            addAll(
+                runCatching {
+                    bluetoothManager?.getConnectedDevices(BluetoothProfile.GATT).orEmpty()
+                }.getOrDefault(emptyList())
+            )
+        }
 
-        val candidate = (gattConnected + bt.bondedDevices)
+        val candidate = connectedDevices
             .distinctBy { it.address }
             .firstOrNull(::isSpaceBuds)
 
-        if (candidate != null) {
-            _device.value = candidate
-            _status.value = "AirBuds detected: " + safeName(candidate)
-        } else {
-            _status.value = "Looking for connected AirBuds..."
+        if (candidate == null) {
+            _bluetoothConnected.value = false
+            closeGatt()
+            _status.value = "Connect SpaceBuds Z from Android Bluetooth settings"
+            return
         }
 
-        @Suppress("DEPRECATION")
-        bt.getProfileProxy(activity, profileListener, BluetoothProfile.A2DP)
-        @Suppress("DEPRECATION")
-        bt.getProfileProxy(activity, profileListener, BluetoothProfile.HEADSET)
+        _device.value = candidate
+        _bluetoothConnected.value = true
 
-        if (candidate == null && canScan()) {
-            scanForSpaceBuds(autoConnect = false)
+        when {
+            _connected.value -> {
+                _status.value = "Bluetooth connected. App is ready."
+            }
+            _connecting.value -> {
+                _status.value = "Bluetooth connected. Preparing device controls..."
+            }
+            else -> {
+                _status.value = "Bluetooth connected: " + safeName(candidate)
+                prepareGatt(candidate)
+            }
         }
     }
 
-    fun connect() {
-        if (!canConnect()) {
-            _status.value = "Bluetooth permission is required"
-            return
-        }
-
-        if (adapter?.isEnabled != true) {
-            _status.value = "Bluetooth is turned off"
-            return
-        }
-
-        val target = _device.value
-        if (target == null) {
-            _status.value = "AirBuds not located yet, starting BLE scan..."
-            scanForSpaceBuds(autoConnect = true)
-            return
-        }
-
-        connectTo(target)
+    fun refresh() {
+        startMonitoring()
     }
 
-    private fun connectTo(target: BluetoothDevice) {
-        stopScan()
+    private fun prepareGatt(target: BluetoothDevice) {
+        if (_connecting.value && gattConnection != null) return
+
+        val existing = gattConnection
+        if (
+            existing != null &&
+            existing.device.address == target.address &&
+            _connected.value
+        ) return
+
         cancelGattTimeout()
-
-        gattConnection?.let { oldGatt ->
+        existing?.let { oldGatt ->
             runCatching { oldGatt.disconnect() }
             runCatching { oldGatt.close() }
         }
@@ -186,13 +236,15 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         _connected.value = false
         _connecting.value = true
         _gatt.value = emptyList()
-        _status.value = "Connecting to " + safeName(target) + " over BLE..."
+        _status.value = "Bluetooth connected. Opening device GATT..."
 
         val gatt = runCatching {
             connectGattCompat(target)
         }.getOrElse {
             _connecting.value = false
-            _status.value = "Could not start GATT: " + it.javaClass.simpleName
+            _status.value =
+                "Bluetooth is connected, but GATT could not start: " +
+                    it.javaClass.simpleName
             null
         }
 
@@ -200,7 +252,6 @@ class SpaceBudsController(private val activity: ComponentActivity) {
 
         if (gatt == null) {
             _connecting.value = false
-            _status.value = "Could not start GATT connection"
             return
         }
 
@@ -212,79 +263,9 @@ class SpaceBudsController(private val activity: ComponentActivity) {
                 _connecting.value = false
                 _connected.value = false
                 _status.value =
-                    "GATT connection timed out after 15 seconds. The earbuds may be connected for audio but not exposing a reachable GATT server."
+                    "Bluetooth is connected, but GATT timed out after 15 seconds."
             }
         }.also { mainHandler.postDelayed(it, GATT_CONNECT_TIMEOUT_MS) }
-    }
-
-    private fun scanForSpaceBuds(autoConnect: Boolean) {
-        if (!canConnect() || !canScan()) {
-            _status.value = "Bluetooth scan permission is required"
-            return
-        }
-
-        val scanner = adapter?.bluetoothLeScanner
-        if (scanner == null) {
-            _status.value = "BLE scanner unavailable"
-            return
-        }
-
-        stopScan()
-        _status.value = "Scanning for SpaceBuds Z..."
-
-        val callback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val name = result.scanRecord?.deviceName ?: runCatching {
-                    if (canConnect()) result.device.name else null
-                }.getOrNull() ?: return
-
-                val normalized = name
-                    .replace(" ", "")
-                    .replace("-", "")
-                    .lowercase()
-
-                val match = normalized.contains("spacebuds") ||
-                    normalized.contains("otw625") ||
-                    normalized.contains("625l")
-
-                if (!match) return
-
-                _device.value = result.device
-                _status.value = "AirBuds found: " + name
-                stopScan()
-
-                if (autoConnect) {
-                    connectTo(result.device)
-                }
-            }
-
-            override fun onScanFailed(errorCode: Int) {
-                _status.value = "BLE scan failed: " + errorCode
-                scanCallback = null
-            }
-        }
-
-        scanCallback = callback
-        runCatching {
-            scanner.startScan(
-                null,
-                ScanSettings.Builder()
-                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                    .build(),
-                callback
-            )
-        }.onFailure {
-            scanCallback = null
-            _status.value = "BLE scan could not start: " + it.javaClass.simpleName
-        }
-
-        mainHandler.postDelayed({ stopScan() }, 10_000L)
-    }
-
-    private fun stopScan() {
-        val callback = scanCallback ?: return
-        runCatching { adapter?.bluetoothLeScanner?.stopScan(callback) }
-        scanCallback = null
     }
 
     @Suppress("DEPRECATION")
@@ -310,8 +291,7 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         gattTimeoutRunnable = null
     }
 
-    fun disconnect() {
-        stopScan()
+    private fun closeGatt() {
         cancelGattTimeout()
         gattConnection?.let { gatt ->
             runCatching { gatt.disconnect() }
@@ -321,11 +301,19 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         _connected.value = false
         _connecting.value = false
         _gatt.value = emptyList()
-        _status.value = "Disconnected"
+    }
+
+    fun disconnect() {
+        closeGatt()
+        refreshSystemConnection()
     }
 
     fun close() {
-        disconnect()
+        if (receiverRegistered) {
+            runCatching { activity.unregisterReceiver(bluetoothReceiver) }
+            receiverRegistered = false
+        }
+        closeGatt()
         mainHandler.removeCallbacksAndMessages(null)
     }
 
@@ -348,17 +336,18 @@ class SpaceBudsController(private val activity: ComponentActivity) {
             ) {
                 _connecting.value = false
                 _connected.value = true
-                _status.value = "GATT connected to " + safeName(gatt.device)
-                if (canConnect() && gatt.discoverServices()) {
-                    _status.value = "Connected, discovering GATT services..."
-                } else {
-                    _status.value = "GATT connected, service discovery could not start"
+                _status.value = "Bluetooth connected. Device GATT is ready."
+
+                if (!canConnect() || !gatt.discoverServices()) {
+                    _status.value =
+                        "Bluetooth connected, but GATT service discovery could not start"
                 }
             } else {
                 _connecting.value = false
                 _connected.value = false
                 _status.value =
-                    "GATT connection failed: status=" + status + ", state=" + newState
+                    "Bluetooth is connected, but GATT failed: status=" +
+                        status + ", state=" + newState
                 runCatching { gatt.close() }
                 if (gattConnection === gatt) {
                     gattConnection = null
@@ -367,10 +356,15 @@ class SpaceBudsController(private val activity: ComponentActivity) {
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (gattConnection !== gatt) return
+
             if (status != BluetoothGatt.GATT_SUCCESS || !canConnect()) {
-                _status.value = "GATT service discovery failed: status=" + status
+                _status.value =
+                    "Bluetooth connected, but GATT service discovery failed: status=" +
+                        status
                 return
             }
+
             _gatt.value = gatt.services.flatMap { service ->
                 service.characteristics.map { characteristic ->
                     val properties = characteristic.properties
@@ -383,9 +377,26 @@ class SpaceBudsController(private val activity: ComponentActivity) {
                     )
                 }
             }
-            _status.value = "GATT services discovered: " + _gatt.value.size + " characteristics"
+
+            _status.value =
+                "Bluetooth connected. GATT services discovered: " +
+                    _gatt.value.size + " characteristics"
         }
     }
+}
+
+internal fun isSupportedSpaceBudsName(name: String?): Boolean {
+    val normalized = name
+        ?.replace(" ", "")
+        ?.replace("-", "")
+        ?.lowercase()
+        ?: return false
+
+    return normalized.isNotBlank() && (
+        normalized.contains("spacebuds") ||
+            normalized.contains("otw625") ||
+            normalized.contains("625l")
+        )
 }
 
 class MainActivity : ComponentActivity() {
@@ -414,15 +425,17 @@ fun SpaceBudsApp(activity: ComponentActivity) {
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        if (permissions[Manifest.permission.BLUETOOTH_CONNECT] == true) {
-            controller.refresh()
+        if (permissions[Manifest.permission.BLUETOOTH_CONNECT] == true &&
+            permissions[Manifest.permission.BLUETOOTH_SCAN] == true
+        ) {
+            controller.startMonitoring()
         } else {
             controller.disconnect()
         }
     }
 
     DisposableEffect(Unit) {
-        controller.refresh()
+        controller.startMonitoring()
         onDispose { controller.close() }
     }
 
@@ -479,7 +492,7 @@ fun SpaceBudsApp(activity: ComponentActivity) {
                             Text(
                                 device?.let {
                                     safeDeviceName(activity, it)
-                                } ?: "SpaceBuds Z not detected",
+                                } ?: "SpaceBuds Z not connected",
                                 style = MaterialTheme.typography.headlineSmall
                             )
                             Text(status)
@@ -495,15 +508,15 @@ fun SpaceBudsApp(activity: ComponentActivity) {
                                     } else {
                                         controller.refresh()
                                     }
-                                }) { Text("Find") }
-                                Button(
-                                    enabled = !connecting && !connected,
-                                    onClick = controller::connect
-                                ) { Text("Connect") }
-                                OutlinedButton(
-                                    enabled = connected || connecting,
-                                    onClick = controller::disconnect
-                                ) { Text("Disconnect") }
+                                }) { Text("Refresh") }
+
+                                OutlinedButton(onClick = {
+                                    runCatching {
+                                        activity.startActivity(
+                                            Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)
+                                        )
+                                    }
+                                }) { Text("Bluetooth settings") }
                             }
                         }
                     }
