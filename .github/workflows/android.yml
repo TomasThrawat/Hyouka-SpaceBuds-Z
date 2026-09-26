@@ -16,3 +16,10 @@ jobs:
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v5
       - run: gradle assembleDebug --stacktrace --warning-mode all
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hyouka-SpaceBuds-Z-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
